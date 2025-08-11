@@ -2,7 +2,7 @@ import streamlit as st
 import os
 import json
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
@@ -11,11 +11,14 @@ from pptx.enum.shapes import MSO_SHAPE
 from datetime import datetime
 import io
 import base64
+import requests
+from PIL import Image
+import google.generativeai as genai
 
 # Set page config
 st.set_page_config(
-    page_title="AI PowerPoint Generator",
-    page_icon="📊",
+    page_title="AI PowerPoint Generator Pro",
+    page_icon="🚀",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -46,17 +49,108 @@ st.markdown("""
     color: #0d47a1;
     margin: 1rem 0;
 }
+.custom-content-box {
+    background-color: #f8f9fa;
+    border-radius: 10px;
+    padding: 1rem;
+    border-left: 4px solid #007bff;
+}
 </style>
 """, unsafe_allow_html=True)
 
-class AIContentGenerator:
-    """Handles AI-powered content generation for presentations"""
+class GeminiContentGenerator:
+    """Enhanced AI content generator using Gemini AI"""
     
     def __init__(self, api_key: str = None):
         self.api_key = api_key
+        if api_key:
+            genai.configure(api_key=api_key)
+            self.model = genai.GenerativeModel('gemini-pro')
+        else:
+            self.model = None
     
-    def generate_content_structure(self, topic: str, num_slides: int = 5, focus_areas: List[str] = None) -> Dict[str, Any]:
-        """Generate a structured presentation outline"""
+    def generate_content_structure(self, topic: str, num_slides: int = 5, 
+                                 focus_areas: List[str] = None, 
+                                 custom_content: str = None,
+                                 target_audience: str = None,
+                                 presentation_style: str = "professional") -> Dict[str, Any]:
+        """Generate AI-powered presentation structure using Gemini"""
+        
+        if self.model and self.api_key:
+            return self._generate_with_gemini(topic, num_slides, focus_areas, custom_content, target_audience, presentation_style)
+        else:
+            return self._generate_fallback_content(topic, num_slides, focus_areas, custom_content)
+    
+    def _generate_with_gemini(self, topic: str, num_slides: int, focus_areas: List[str], 
+                            custom_content: str, target_audience: str, presentation_style: str) -> Dict[str, Any]:
+        """Generate content using Gemini AI"""
+        
+        prompt = f"""
+        Create a comprehensive presentation structure for the topic: "{topic}"
+        
+        Requirements:
+        - Number of content slides: {num_slides}
+        - Target audience: {target_audience or 'General business audience'}
+        - Presentation style: {presentation_style}
+        - Focus areas: {', '.join(focus_areas) if focus_areas else 'balanced coverage'}
+        
+        {f"Additional custom content to incorporate: {custom_content}" if custom_content else ""}
+        
+        Please provide a JSON structure with:
+        1. A compelling title and subtitle
+        2. {num_slides} detailed content slides with:
+           - Engaging titles
+           - Detailed content descriptions (2-3 sentences)
+           - 4-6 bullet points per slide
+           - Image suggestions for each slide
+        
+        Focus on creating engaging, informative content that flows logically.
+        Make the content domain-specific and relevant to the topic.
+        
+        Return in JSON format:
+        {{
+            "title": "presentation title",
+            "subtitle": "presentation subtitle", 
+            "slides": [
+                {{
+                    "slide_number": 1,
+                    "type": "slide_type",
+                    "title": "slide title",
+                    "content": "detailed description",
+                    "bullet_points": ["point1", "point2", "point3", "point4"],
+                    "image_prompt": "description for image generation"
+                }}
+            ]
+        }}
+        """
+        
+        try:
+            response = self.model.generate_content(prompt)
+            # Extract JSON from response
+            response_text = response.text
+            
+            # Find JSON content between ```json and ```
+            json_match = re.search(r'```(?:json)?\s*(.*?)\s*```', response_text, re.DOTALL)
+            if json_match:
+                json_content = json_match.group(1)
+            else:
+                # If no code blocks, try to find JSON-like content
+                json_content = response_text
+            
+            # Parse JSON
+            try:
+                structure = json.loads(json_content)
+                return structure
+            except json.JSONDecodeError:
+                st.warning("⚠️ Could not parse AI response as JSON. Using fallback content generation.")
+                return self._generate_fallback_content(topic, num_slides, focus_areas, custom_content)
+                
+        except Exception as e:
+            st.error(f"❌ Error with Gemini AI: {str(e)}")
+            return self._generate_fallback_content(topic, num_slides, focus_areas, custom_content)
+    
+    def _generate_fallback_content(self, topic: str, num_slides: int, focus_areas: List[str], custom_content: str) -> Dict[str, Any]:
+        """Fallback content generation when AI is not available"""
         
         structure = {
             "title": f"{topic}",
@@ -64,7 +158,20 @@ class AIContentGenerator:
             "slides": []
         }
         
-        # Define slide types based on user focus areas or defaults
+        # Incorporate custom content if provided
+        if custom_content:
+            custom_slide = {
+                "slide_number": 1,
+                "type": "custom",
+                "title": f"About {topic}",
+                "content": custom_content,
+                "bullet_points": self._extract_key_points_from_text(custom_content),
+                "image_prompt": f"{topic} overview illustration"
+            }
+            structure["slides"].append(custom_slide)
+            num_slides -= 1
+        
+        # Define slide types based on focus areas
         if focus_areas:
             slide_types = focus_areas
         else:
@@ -73,116 +180,165 @@ class AIContentGenerator:
         for i in range(min(num_slides, len(slide_types))):
             slide_type = slide_types[i] if i < len(slide_types) else "detailed"
             slide_content = self._generate_slide_content(topic, slide_type)
-            
-            structure["slides"].append({
-                "slide_number": i + 1,
-                "type": slide_type,
-                "title": slide_content["title"],
-                "content": slide_content["content"],
-                "bullet_points": slide_content.get("bullet_points", [])
-            })
+            slide_content["slide_number"] = len(structure["slides"]) + 1
+            structure["slides"].append(slide_content)
         
         return structure
     
+    def _extract_key_points_from_text(self, text: str) -> List[str]:
+        """Extract key points from custom content"""
+        sentences = text.split('.')
+        points = []
+        for sentence in sentences[:4]:  # Take first 4 sentences
+            sentence = sentence.strip()
+            if len(sentence) > 10:
+                points.append(sentence)
+        
+        if len(points) < 3:
+            points.extend([
+                "Key insight from the provided content",
+                "Important consideration for implementation", 
+                "Strategic implications and next steps"
+            ])
+        
+        return points[:6]  # Limit to 6 points
+    
     def _generate_slide_content(self, topic: str, slide_type: str) -> Dict[str, Any]:
-        """Generate content for a specific slide type"""
+        """Generate content for a specific slide type with image prompts"""
         
         content_templates = {
             "introduction": {
                 "title": f"Introduction to {topic}",
                 "content": f"Welcome to our comprehensive presentation on {topic}. Today we'll explore the key aspects, benefits, and implications of this important subject.",
+                "type": slide_type,
                 "bullet_points": [
                     f"Understanding {topic}",
                     "Key concepts and definitions",
                     "Why this matters today",
                     "What we'll cover in this presentation"
-                ]
+                ],
+                "image_prompt": f"{topic} introduction concept, modern professional illustration"
             },
             "overview": {
                 "title": f"{topic} - Overview",
                 "content": f"Let's examine the main components and aspects of {topic}.",
+                "type": slide_type,
                 "bullet_points": [
                     "Historical context and background",
                     "Current state and trends",
                     "Key stakeholders involved",
                     "Main applications and use cases"
-                ]
-            },
-            "detailed": {
-                "title": f"Deep Dive into {topic}",
-                "content": f"Here's a detailed analysis of the core elements of {topic}.",
-                "bullet_points": [
-                    "Technical specifications and requirements",
-                    "Implementation strategies",
-                    "Best practices and methodologies",
-                    "Real-world examples and case studies"
-                ]
+                ],
+                "image_prompt": f"{topic} overview infographic, business concept visualization"
             },
             "benefits": {
                 "title": f"Benefits of {topic}",
                 "content": f"Exploring the key advantages and positive impacts of {topic}.",
+                "type": slide_type,
                 "bullet_points": [
                     "Improved efficiency and productivity",
                     "Cost savings and resource optimization",
                     "Enhanced user experience",
                     "Future growth opportunities"
-                ]
+                ],
+                "image_prompt": f"{topic} benefits illustration, growth and success concept"
             },
             "challenges": {
                 "title": f"Challenges in {topic}",
                 "content": f"Understanding the obstacles and considerations for {topic}.",
+                "type": slide_type,
                 "bullet_points": [
                     "Technical limitations and constraints",
                     "Implementation barriers",
                     "Resource requirements",
                     "Risk mitigation strategies"
-                ]
-            },
-            "conclusion": {
-                "title": f"Conclusion - {topic}",
-                "content": f"Summary of key takeaways from our discussion on {topic}.",
-                "bullet_points": [
-                    "Recap of main points covered",
-                    "Strategic recommendations",
-                    "Next steps and action items",
-                    "Questions and discussion"
-                ]
-            },
-            "market_analysis": {
-                "title": f"Market Analysis - {topic}",
-                "content": f"Current market trends and opportunities in {topic}.",
-                "bullet_points": [
-                    "Market size and growth projections",
-                    "Key players and competitors",
-                    "Market opportunities and gaps",
-                    "Consumer behavior and preferences"
-                ]
-            },
-            "technical_specs": {
-                "title": f"Technical Specifications - {topic}",
-                "content": f"Technical details and specifications for {topic}.",
-                "bullet_points": [
-                    "System requirements and architecture",
-                    "Performance metrics and benchmarks",
-                    "Security and compliance standards",
-                    "Integration capabilities"
-                ]
+                ],
+                "image_prompt": f"{topic} challenges visualization, problem-solving concept"
             }
         }
         
         return content_templates.get(slide_type, {
             "title": f"{slide_type.replace('_', ' ').title()} - {topic}",
             "content": f"Detailed information about {topic}",
+            "type": slide_type,
             "bullet_points": [
                 "Key point 1",
-                "Key point 2", 
-                "Key point 3",
+                "Key point 2",
+                "Key point 3", 
                 "Summary and takeaways"
-            ]
+            ],
+            "image_prompt": f"{topic} {slide_type} professional illustration"
         })
 
-class PresentationDesigner:
-    """Handles presentation design and formatting"""
+class ImageGenerator:
+    """Handles domain-related image generation"""
+    
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key
+        self.base_url = "https://api.openai.com/v1/images/generations"  # OpenAI DALL-E
+        # Alternative: You can use Stability AI, Midjourney API, etc.
+        
+    def generate_image(self, prompt: str, size: str = "1024x1024") -> Optional[bytes]:
+        """Generate an image based on the prompt"""
+        
+        if not self.api_key:
+            return self._generate_placeholder_image(prompt)
+        
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "model": "dall-e-3",
+                "prompt": f"Professional business presentation style: {prompt}. Clean, modern, suitable for corporate presentation.",
+                "n": 1,
+                "size": size,
+                "quality": "standard"
+            }
+            
+            response = requests.post(self.base_url, headers=headers, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                image_url = result["data"][0]["url"]
+                
+                # Download the image
+                img_response = requests.get(image_url, timeout=30)
+                if img_response.status_code == 200:
+                    return img_response.content
+            
+        except Exception as e:
+            st.warning(f"⚠️ Image generation failed: {str(e)}. Using placeholder.")
+        
+        return self._generate_placeholder_image(prompt)
+    
+    def _generate_placeholder_image(self, prompt: str) -> bytes:
+        """Generate a colored placeholder image"""
+        from PIL import Image, ImageDraw, ImageFont
+        
+        # Create a colored rectangle as placeholder
+        img = Image.new('RGB', (800, 600), color=(100, 149, 237))
+        draw = ImageDraw.Draw(img)
+        
+        # Add text
+        try:
+            font = ImageFont.load_default()
+        except:
+            font = None
+            
+        text = f"Image: {prompt[:50]}..."
+        draw.text((50, 250), text, fill=(255, 255, 255), font=font)
+        draw.text((50, 300), "[AI Image Placeholder]", fill=(255, 255, 255), font=font)
+        
+        # Convert to bytes
+        img_bytes = io.BytesIO()
+        img.save(img_bytes, format='PNG')
+        return img_bytes.getvalue()
+
+class EnhancedPresentationDesigner:
+    """Enhanced presentation designer with image support"""
     
     def __init__(self):
         self.themes = {
@@ -195,7 +351,7 @@ class PresentationDesigner:
                 "accent_color": RGBColor(0, 123, 191)
             },
             "modern": {
-                "name": "Modern",
+                "name": "Modern", 
                 "description": "Contemporary design with subtle colors",
                 "background_color": RGBColor(248, 249, 250),
                 "title_color": RGBColor(33, 37, 41),
@@ -229,32 +385,43 @@ class PresentationDesigner:
     def get_theme_colors(self) -> Dict[str, RGBColor]:
         return {k: v for k, v in self.themes[self.current_theme].items() if isinstance(v, RGBColor)}
 
-class StreamlitPowerPointGenerator:
-    """Streamlit-optimized PowerPoint generator"""
+class EnhancedPowerPointGenerator:
+    """Enhanced PowerPoint generator with AI content and image generation"""
     
-    def __init__(self):
-        self.content_generator = AIContentGenerator()
-        self.designer = PresentationDesigner()
+    def __init__(self, gemini_api_key: str = None, image_api_key: str = None):
+        self.content_generator = GeminiContentGenerator(gemini_api_key)
+        self.image_generator = ImageGenerator(image_api_key)
+        self.designer = EnhancedPresentationDesigner()
     
-    def create_presentation(self, topic: str, num_slides: int = 5, theme: str = "professional", focus_areas: List[str] = None) -> bytes:
-        """Create a PowerPoint presentation and return as bytes"""
+    def create_presentation(self, topic: str, num_slides: int = 5, theme: str = "professional", 
+                          focus_areas: List[str] = None, custom_content: str = None,
+                          target_audience: str = None, presentation_style: str = "professional",
+                          include_images: bool = False) -> bytes:
+        """Create an enhanced PowerPoint presentation with AI content and images"""
         
         self.designer.set_theme(theme)
         
         # Generate content structure
-        with st.spinner(f"🤖 Generating AI content for: {topic}..."):
-            content_structure = self.content_generator.generate_content_structure(topic, num_slides, focus_areas)
+        with st.spinner(f"🧠 Generating AI content for: {topic}..."):
+            content_structure = self.content_generator.generate_content_structure(
+                topic, num_slides, focus_areas, custom_content, target_audience, presentation_style
+            )
         
         # Create presentation
-        with st.spinner("📊 Creating PowerPoint slides..."):
+        with st.spinner("🎨 Creating PowerPoint slides..."):
             prs = Presentation()
             
             # Add title slide
             self._create_title_slide(prs, content_structure["title"], content_structure["subtitle"])
             
-            # Add content slides
-            for slide_data in content_structure["slides"]:
-                self._create_content_slide(prs, slide_data)
+            # Add content slides with images
+            for i, slide_data in enumerate(content_structure["slides"]):
+                if include_images:
+                    with st.spinner(f"🖼️ Generating image for slide {i+1}..."):
+                        image_bytes = self.image_generator.generate_image(slide_data.get("image_prompt", f"{topic} slide {i+1}"))
+                        slide_data["image_bytes"] = image_bytes
+                
+                self._create_content_slide_with_image(prs, slide_data, include_images)
             
             # Add closing slide
             self._create_closing_slide(prs, topic)
@@ -286,33 +453,62 @@ class StreamlitPowerPointGenerator:
             paragraph.font.color.rgb = self.designer.get_theme_colors()["content_color"]
             paragraph.alignment = PP_ALIGN.CENTER
     
-    def _create_content_slide(self, prs, slide_data: Dict[str, Any]):
-        slide_layout = prs.slide_layouts[1]
+    def _create_content_slide_with_image(self, prs, slide_data: Dict[str, Any], include_images: bool = False):
+        # Use a layout that supports images
+        slide_layout = prs.slide_layouts[5] if include_images else prs.slide_layouts[1] 
         slide = prs.slides.add_slide(slide_layout)
         
-        title_shape = slide.shapes.title
-        title_shape.text = slide_data["title"]
+        # Add title
+        if include_images:
+            # Create title manually for blank layout
+            title_shape = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(9), Inches(1))
+            title_frame = title_shape.text_frame
+            title_frame.text = slide_data["title"]
+            title_paragraph = title_frame.paragraphs[0]
+            title_paragraph.font.size = Pt(32)
+            title_paragraph.font.color.rgb = self.designer.get_theme_colors()["title_color"]
+            title_paragraph.alignment = PP_ALIGN.LEFT
+            
+            # Add image if available
+            if slide_data.get("image_bytes"):
+                try:
+                    image_stream = io.BytesIO(slide_data["image_bytes"])
+                    slide.shapes.add_picture(image_stream, Inches(5.5), Inches(1.5), Inches(4), Inches(3))
+                except Exception as e:
+                    st.warning(f"⚠️ Could not add image to slide: {str(e)}")
+            
+            # Add content text
+            content_shape = slide.shapes.add_textbox(Inches(0.5), Inches(1.5), Inches(4.5), Inches(5))
+            text_frame = content_shape.text_frame
+            
+        else:
+            # Use standard layout
+            title_shape = slide.shapes.title
+            title_shape.text = slide_data["title"]
+            
+            title_paragraph = title_shape.text_frame.paragraphs[0]
+            title_paragraph.font.size = Pt(36)
+            title_paragraph.font.color.rgb = self.designer.get_theme_colors()["title_color"]
+            
+            content_shape = slide.placeholders[1]
+            text_frame = content_shape.text_frame
         
-        title_paragraph = title_shape.text_frame.paragraphs[0]
-        title_paragraph.font.size = Pt(36)
-        title_paragraph.font.color.rgb = self.designer.get_theme_colors()["title_color"]
-        
-        content_shape = slide.placeholders[1]
-        text_frame = content_shape.text_frame
         text_frame.clear()
         
+        # Add content
         if slide_data.get("content"):
             p = text_frame.paragraphs[0]
             p.text = slide_data["content"]
-            p.font.size = Pt(18)
+            p.font.size = Pt(16 if include_images else 18)
             p.font.color.rgb = self.designer.get_theme_colors()["content_color"]
             p.space_after = Pt(12)
         
+        # Add bullet points
         for bullet_point in slide_data.get("bullet_points", []):
             p = text_frame.add_paragraph()
             p.text = bullet_point
             p.level = 1
-            p.font.size = Pt(20)
+            p.font.size = Pt(14 if include_images else 16)
             p.font.color.rgb = self.designer.get_theme_colors()["content_color"]
             p.space_after = Pt(6)
     
@@ -338,11 +534,29 @@ class StreamlitPowerPointGenerator:
             paragraph.font.color.rgb = self.designer.get_theme_colors()["content_color"]
             paragraph.alignment = PP_ALIGN.CENTER
 
-# Streamlit App
+# Enhanced Streamlit App
 def main():
     # Header
-    st.title("🤖 AI PowerPoint Generator")
-    st.markdown("**Generate professional presentations with AI in seconds!**")
+    st.title("🚀 AI PowerPoint Generator Pro")
+    st.markdown("**Generate professional presentations with AI content and domain-specific images!**")
+    
+    # API Keys Configuration
+    with st.expander("🔑 API Configuration", expanded=False):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            gemini_api_key = st.text_input(
+                "Gemini API Key (for AI content)",
+                type="password",
+                help="Get your API key from Google AI Studio: https://makersuite.google.com/app/apikey"
+            )
+        
+        with col2:
+            image_api_key = st.text_input(
+                "Image Generation API Key (OpenAI)",
+                type="password", 
+                help="Get your API key from OpenAI: https://platform.openai.com/api-keys"
+            )
     
     # Sidebar
     with st.sidebar:
@@ -350,15 +564,29 @@ def main():
         
         # Topic input
         topic = st.text_input(
-            "📝 Presentation Topic", 
-            value="Artificial Intelligence in Business",
+            "📝 Presentation Topic",
+            value="Artificial Intelligence in Healthcare",
             help="Enter the main topic for your presentation"
+        )
+        
+        # Target audience
+        target_audience = st.selectbox(
+            "🎯 Target Audience",
+            ["General Business", "Technical Team", "Executives", "Students", "Investors", "General Public"],
+            help="Select your target audience for tailored content"
+        )
+        
+        # Presentation style
+        presentation_style = st.selectbox(
+            "🎨 Presentation Style",
+            ["Professional", "Creative", "Educational", "Sales Pitch", "Technical Deep-dive"],
+            help="Choose the overall tone and style"
         )
         
         # Number of slides
         num_slides = st.slider(
-            "📊 Number of Content Slides", 
-            min_value=3, 
+            "📊 Number of Content Slides",
+            min_value=3,
             max_value=15, 
             value=6,
             help="Choose how many content slides you want"
@@ -366,7 +594,7 @@ def main():
         
         # Theme selection
         st.subheader("🎨 Choose Theme")
-        generator = StreamlitPowerPointGenerator()
+        generator = EnhancedPowerPointGenerator(gemini_api_key, image_api_key)
         
         theme_options = {}
         for theme_key, theme_data in generator.designer.themes.items():
@@ -384,49 +612,59 @@ def main():
         st.info(f"**{theme_info['name']}**: {theme_info['description']}")
         
         # Focus areas
-        st.subheader("🎯 Focus Areas (Optional)")
+        st.subheader("🎯 Focus Areas")
         focus_areas = st.multiselect(
             "Select specific areas to focus on:",
             ["introduction", "overview", "benefits", "challenges", "market_analysis", "technical_specs", "conclusion"],
-            default=["introduction", "overview", "benefits", "challenges", "conclusion"],
+            default=["introduction", "overview", "benefits", "challenges"],
             help="Choose which aspects to emphasize in your presentation"
         )
         
-        # Advanced options
-        with st.expander("🔧 Advanced Options"):
-            include_charts = st.checkbox("Include Chart Placeholders", value=False)
-            include_images = st.checkbox("Include Image Placeholders", value=False)
-            custom_footer = st.text_input("Custom Footer Text", value="")
+        # Image generation
+        include_images = st.checkbox(
+            "🖼️ Generate Domain-Related Images",
+            value=bool(image_api_key),
+            help="Generate relevant images for each slide (requires API key)"
+        )
+        
+        if include_images and not image_api_key:
+            st.warning("⚠️ Image generation requires an API key. Placeholder images will be used.")
     
     # Main content area
     col1, col2 = st.columns([2, 1])
     
     with col1:
+        st.subheader("📝 Custom Content Input")
+        
+        # Custom content input
+        custom_content = st.text_area(
+            "Add your custom content (optional):",
+            height=200,
+            placeholder="Enter any specific information, data, or points you want to include in your presentation. This will be incorporated along with AI-generated content.",
+            help="This content will be intelligently integrated into your presentation"
+        )
+        
+        if custom_content:
+            st.markdown('<div class="custom-content-box">✅ <strong>Custom content will be incorporated</strong> into your presentation along with AI-generated content.</div>', unsafe_allow_html=True)
+        
+        # Preview section
         st.subheader("📋 Presentation Preview")
         
         if topic:
-            # Preview the structure
-            preview_structure = generator.content_generator.generate_content_structure(
-                topic, num_slides, focus_areas if focus_areas else None
-            )
-            
+            # Show what will be generated
             st.markdown("**Your presentation will include:**")
+            st.markdown(f"- **Topic**: {topic}")
+            st.markdown(f"- **Target Audience**: {target_audience}")
+            st.markdown(f"- **Style**: {presentation_style}")
+            st.markdown(f"- **Content Slides**: {num_slides}")
+            st.markdown(f"- **Theme**: {selected_theme_name}")
+            st.markdown(f"- **Images**: {'✅ AI-generated' if include_images else '❌ Text only'}")
+            st.markdown(f"- **Custom Content**: {'✅ Included' if custom_content else '❌ AI-only'}")
             
-            # Title slide preview
-            st.markdown("**1. Title Slide**")
-            st.markdown(f"- **Title**: {preview_structure['title']}")
-            st.markdown(f"- **Subtitle**: {preview_structure['subtitle']}")
-            
-            # Content slides preview
-            for i, slide in enumerate(preview_structure['slides'], 2):
-                with st.expander(f"**{i}. {slide['title']}**"):
-                    st.markdown(f"**Content**: {slide['content']}")
-                    st.markdown("**Key Points**:")
-                    for point in slide['bullet_points']:
-                        st.markdown(f"• {point}")
-            
-            # Closing slide
-            st.markdown(f"**{len(preview_structure['slides']) + 2}. Thank You Slide**")
+            if gemini_api_key:
+                st.success("🤖 **Gemini AI** will generate intelligent, tailored content")
+            else:
+                st.info("💡 Add Gemini API key for enhanced AI content generation")
         
         else:
             st.info("👆 Enter a topic in the sidebar to see the presentation preview")
@@ -434,24 +672,32 @@ def main():
     with col2:
         st.subheader("🚀 Generate Presentation")
         
-        if st.button("🎯 Generate PowerPoint", type="primary", disabled=not topic):
+        # Generate button
+        if st.button("🎯 Generate AI PowerPoint", type="primary", disabled=not topic):
             if topic:
                 try:
+                    # Create enhanced generator instance
+                    generator = EnhancedPowerPointGenerator(gemini_api_key, image_api_key)
+                    
                     # Generate presentation
                     ppt_bytes = generator.create_presentation(
                         topic=topic,
                         num_slides=num_slides,
                         theme=selected_theme,
-                        focus_areas=focus_areas if focus_areas else None
+                        focus_areas=focus_areas if focus_areas else None,
+                        custom_content=custom_content if custom_content else None,
+                        target_audience=target_audience,
+                        presentation_style=presentation_style.lower(),
+                        include_images=include_images
                     )
                     
                     # Success message
-                    st.markdown('<div class="success-message">✅ <strong>Success!</strong> Your presentation has been generated!</div>', unsafe_allow_html=True)
+                    st.markdown('<div class="success-message">✅ <strong>Success!</strong> Your AI-powered presentation has been generated!</div>', unsafe_allow_html=True)
                     
                     # Generate filename
                     clean_topic = re.sub(r'[^\w\s-]', '', topic)
                     clean_topic = re.sub(r'[-\s]+', '_', clean_topic)
-                    filename = f"AI_Presentation_{clean_topic}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pptx"
+                    filename = f"AI_Pro_Presentation_{clean_topic}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pptx"
                     
                     # Download button
                     st.download_button(
@@ -463,44 +709,94 @@ def main():
                     )
                     
                     # Display file info
-                    st.info(f"**File**: {filename}  \n**Size**: {len(ppt_bytes) / 1024:.1f} KB  \n**Slides**: {num_slides + 2}")
+                    features_used = []
+                    if gemini_api_key:
+                        features_used.append("Gemini AI Content")
+                    if include_images:
+                        features_used.append("AI Images")
+                    if custom_content:
+                        features_used.append("Custom Content")
+                    
+                    st.info(f"""
+                    **File**: {filename}  
+                    **Size**: {len(ppt_bytes) / 1024:.1f} KB  
+                    **Slides**: {num_slides + 2}  
+                    **Features**: {', '.join(features_used) if features_used else 'Standard Generation'}
+                    """)
                     
                 except Exception as e:
                     st.error(f"❌ Error generating presentation: {str(e)}")
-                    st.info("💡 Make sure you have installed: `pip install python-pptx streamlit`")
+                    st.info("💡 Check your API keys and internet connection.")
+                    
+            else:
+                st.warning("⚠️ Please enter a topic to generate the presentation")
         
-        # Quick tips
-        with st.expander("💡 Tips for Better Presentations"):
-            st.markdown("""
-            **For better results:**
-            - Use specific, descriptive topics
-            - Choose 5-8 slides for optimal length
-            - Select focus areas relevant to your audience
-            - Professional theme works best for business
-            - Creative theme is great for educational content
-            """)
+        # Additional options
+        st.markdown("---")
+        st.subheader("💡 Tips")
+        st.markdown("""
+        **For best results:**
+        - Use specific, clear topics
+        - Add custom content for personalization
+        - Choose appropriate audience
+        - Enable images for visual impact
         
-        # Example topics
-        with st.expander("📚 Example Topics"):
-            example_topics = [
-                "Digital Marketing Strategy 2024",
-                "Sustainable Energy Solutions",
-                "Remote Work Best Practices",
-                "Machine Learning for Beginners",
-                "Cybersecurity Fundamentals",
-                "Project Management Methodologies",
-                "Customer Experience Design",
-                "Data Analytics in Healthcare"
-            ]
-            
-            for example_topic in example_topics:
-                if st.button(f"Use: {example_topic}", key=f"example_{example_topic}"):
-                    st.session_state.topic = example_topic
-                    st.rerun()
-
-    # Footer
+        **API Keys needed for:**
+        - 🤖 **Gemini AI**: Enhanced content generation
+        - 🖼️ **OpenAI**: Professional images
+        """)
+        
+        # Quick examples
+        st.subheader("🎯 Topic Examples")
+        example_topics = [
+            "Digital Marketing Strategy 2025",
+            "Sustainable Energy Solutions", 
+            "Machine Learning in Finance",
+            "Remote Work Best Practices",
+            "Cybersecurity Fundamentals"
+        ]
+        
+        for example in example_topics:
+            if st.button(f"📝 {example}", key=example):
+                # Use JavaScript to set the topic input
+                st.rerun()
+    
+    # Footer information
     st.markdown("---")
-    st.markdown("Made with ❤️ using Streamlit and python-pptx | Generate professional presentations in seconds!")
+    st.markdown("""
+    <div class="info-box">
+    <h4>🔧 How it Works</h4>
+    <ol>
+    <li><strong>AI Content Generation</strong>: Gemini AI creates tailored content based on your topic and preferences</li>
+    <li><strong>Smart Slide Design</strong>: Automatically structures content into logical, flowing slides</li>
+    <li><strong>Image Integration</strong>: Generates relevant, professional images for each slide</li>
+    <li><strong>Theme Application</strong>: Applies consistent, professional styling throughout</li>
+    <li><strong>Export Ready</strong>: Creates standard .pptx files compatible with PowerPoint and Google Slides</li>
+    </ol>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Usage statistics (if you want to track)
+    with st.expander("📊 Feature Status", expanded=False):
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if gemini_api_key:
+                st.success("✅ AI Content Generation")
+            else:
+                st.info("ℹ️ Using Fallback Content")
+        
+        with col2:
+            if image_api_key and include_images:
+                st.success("✅ AI Image Generation")
+            else:
+                st.info("ℹ️ Text-Only Mode")
+        
+        with col3:
+            if custom_content:
+                st.success("✅ Custom Content Added")
+            else:
+                st.info("ℹ️ AI-Only Content")
 
 if __name__ == "__main__":
     main()
