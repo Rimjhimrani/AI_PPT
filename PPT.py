@@ -23,10 +23,6 @@ except ImportError:
     GEMINI_AVAILABLE = False
     st.warning("⚠️ Google Generative AI not available. Using fallback content generation.")
 
-# API Keys (embedded)
-GEMINI_API_KEY = "AIzaSyDG9GN6RcrLXJNLdZkf7wyZUk9P_o_1FXo"
-OPENAI_API_KEY = "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"
-
 # Set page config
 st.set_page_config(
     page_title="AI PowerPoint Generator Pro",
