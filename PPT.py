@@ -710,7 +710,7 @@ def main():
         
         # Theme selection
         st.subheader("🎨 Choose Theme")
-        generator = EnhancePowerPointGenerator()
+        generator = EnhancedPowerPointGenerator()
         
         themes = generator.designer.themes
         theme_names = list(themes.keys())
