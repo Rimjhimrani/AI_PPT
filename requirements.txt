@@ -1,0 +1,11 @@
+streamlit
+python-pptx
+typing-extensions
+watchdog
+gunicorn
+psutil
+requests
+pandas
+numpy
+plotly
+matplotlib
