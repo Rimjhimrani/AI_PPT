@@ -3,14 +3,12 @@ import requests
 from PIL import Image
 import io
 import base64
-from python-pptx import Presentation
-from python-pptx.util import Inches, Pt
-from python-pptx.dml.color import RGBColor
-from python-pptx.enum.text import PP_ALIGN
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
+from pptx.enum.text import PP_ALIGN
 import openai
 import google.generativeai as genai
-from stability_sdk import client
-import stability_sdk.interfaces.gooseai.generation.generation_pb2 as generation
 import json
 import os
 from datetime import datetime
@@ -67,7 +65,7 @@ class PowerPointGenerator:
         """Setup API keys from Streamlit secrets or user input"""
         st.sidebar.header("🔑 API Configuration")
         
-        # OpenAI API Key
+        # OpenAI API Key (for content generation and images)
         openai_key = st.sidebar.text_input(
             "OpenAI API Key", 
             type="password",
@@ -76,16 +74,9 @@ class PowerPointGenerator:
         
         # Google AI API Key (for Gemini)
         google_key = st.sidebar.text_input(
-            "Google AI API Key", 
+            "Google AI API Key (Optional)", 
             type="password",
             value=st.secrets.get("GOOGLE_API_KEY", "")
-        )
-        
-        # Stability AI API Key (for image generation)
-        stability_key = st.sidebar.text_input(
-            "Stability AI API Key", 
-            type="password",
-            value=st.secrets.get("STABILITY_API_KEY", "")
         )
         
         if openai_key:
@@ -134,36 +125,27 @@ class PowerPointGenerator:
         except Exception as e:
             return f"Image analysis failed: {str(e)}"
     
-    def generate_ai_image(self, prompt, stability_key):
-        """Generate AI images using Stability AI"""
+    def generate_ai_image(self, prompt, openai_key):
+        """Generate AI images using OpenAI DALL-E"""
         try:
-            if not stability_key:
+            if not openai_key:
                 return None
             
-            stability_api = client.StabilityInference(
-                key=stability_key,
-                verbose=True,
+            response = openai.Image.create(
+                prompt=f"Professional presentation slide image: {prompt}",
+                n=1,
+                size="1024x1024"
             )
             
-            answers = stability_api.generate(
-                prompt=prompt,
-                seed=992446758,
-                steps=30,
-                cfg_scale=8.0,
-                width=1024,
-                height=768,
-                samples=1,
-                sampler=generation.SAMPLER_K_DPMPP_2M
-            )
+            image_url = response['data'][0]['url']
+            image_response = requests.get(image_url)
             
-            for resp in answers:
-                for artifact in resp.artifacts:
-                    if artifact.finish_reason == generation.FILTER:
-                        st.warning("Image generation filtered due to content policy")
-                        return None
-                    if artifact.type == generation.ARTIFACT_IMAGE:
-                        img = Image.open(io.BytesIO(artifact.binary))
-                        return img
+            if image_response.status_code == 200:
+                img = Image.open(io.BytesIO(image_response.content))
+                return img
+            else:
+                return None
+                
         except Exception as e:
             st.error(f"Image generation failed: {str(e)}")
             return None
