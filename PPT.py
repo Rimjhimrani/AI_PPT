@@ -79,6 +79,13 @@ class PowerPointGenerator:
             value=st.secrets.get("GOOGLE_API_KEY", "")
         )
         
+        # Stability AI API Key (for image generation)
+        stability_key = st.sidebar.text_input(
+            "Stability AI API Key (Optional)", 
+            type="password",
+            value=st.secrets.get("STABILITY_API_KEY", "")
+        )
+        
         if openai_key:
             openai.api_key = openai_key
         if google_key:
@@ -98,7 +105,7 @@ class PowerPointGenerator:
                 'skip_disambig': '1'
             }
             
-            response = requests.get(search_url, params=params)
+            response = requests.get(search_url, params=params, timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 results = []
@@ -107,8 +114,9 @@ class PowerPointGenerator:
                         results.append(result['Text'])
                 return results
         except Exception as e:
-            st.error(f"Web search failed: {str(e)}")
+            st.warning(f"Web search failed: {str(e)}")
             return []
+        return []
     
     def analyze_image(self, image, google_key):
         """Analyze uploaded image using Google Gemini Vision"""
@@ -125,29 +133,60 @@ class PowerPointGenerator:
         except Exception as e:
             return f"Image analysis failed: {str(e)}"
     
-    def generate_ai_image(self, prompt, openai_key):
-        """Generate AI images using OpenAI DALL-E"""
+    def generate_ai_image(self, prompt, api_key, provider="openai"):
+        """Generate AI images using OpenAI DALL-E or Stability AI"""
         try:
-            if not openai_key:
-                return None
+            if provider == "openai" and api_key:
+                response = openai.Image.create(
+                    prompt=f"Professional presentation slide image: {prompt}",
+                    n=1,
+                    size="1024x1024"
+                )
+                
+                image_url = response['data'][0]['url']
+                image_response = requests.get(image_url)
+                
+                if image_response.status_code == 200:
+                    img = Image.open(io.BytesIO(image_response.content))
+                    return img
+                    
+            elif provider == "stability" and api_key:
+                # Stability AI implementation
+                url = "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image"
+                
+                body = {
+                    "steps": 40,
+                    "width": 1024,
+                    "height": 1024,
+                    "seed": 0,
+                    "cfg_scale": 5,
+                    "samples": 1,
+                    "text_prompts": [
+                        {
+                            "text": f"Professional presentation slide image: {prompt}",
+                            "weight": 1
+                        }
+                    ],
+                }
+                
+                headers = {
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                }
+                
+                response = requests.post(url, headers=headers, json=body)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    image_data = base64.b64decode(data["artifacts"][0]["base64"])
+                    img = Image.open(io.BytesIO(image_data))
+                    return img
             
-            response = openai.Image.create(
-                prompt=f"Professional presentation slide image: {prompt}",
-                n=1,
-                size="1024x1024"
-            )
-            
-            image_url = response['data'][0]['url']
-            image_response = requests.get(image_url)
-            
-            if image_response.status_code == 200:
-                img = Image.open(io.BytesIO(image_response.content))
-                return img
-            else:
-                return None
+            return None
                 
         except Exception as e:
-            st.error(f"Image generation failed: {str(e)}")
+            st.warning(f"Image generation failed: {str(e)}")
             return None
     
     def generate_presentation_content(self, topic, research_data, openai_key):
@@ -201,7 +240,7 @@ class PowerPointGenerator:
             return content["slides"]
             
         except Exception as e:
-            st.error(f"Content generation failed: {str(e)}")
+            st.warning(f"Content generation failed: {str(e)}")
             return self.generate_basic_content(topic, research_data)
     
     def generate_basic_content(self, topic, research_data):
@@ -270,15 +309,18 @@ class PowerPointGenerator:
             
             # Add image if available
             if generated_images and i < len(generated_images) and generated_images[i]:
-                img_stream = io.BytesIO()
-                generated_images[i].save(img_stream, format='PNG')
-                img_stream.seek(0)
-                
-                slide.shapes.add_picture(
-                    img_stream, 
-                    Inches(6), Inches(1), 
-                    Inches(3), Inches(3)
-                )
+                try:
+                    img_stream = io.BytesIO()
+                    generated_images[i].save(img_stream, format='PNG')
+                    img_stream.seek(0)
+                    
+                    slide.shapes.add_picture(
+                        img_stream, 
+                        Inches(6), Inches(1), 
+                        Inches(3), Inches(3)
+                    )
+                except Exception as e:
+                    st.warning(f"Failed to add image to slide {i+1}: {str(e)}")
             
             # Add speaker notes
             notes_slide = slide.notes_slide
@@ -291,18 +333,22 @@ class PowerPointGenerator:
         """Read content from uploaded files"""
         content = ""
         
-        if uploaded_file.type == "text/plain":
-            content = str(uploaded_file.read(), "utf-8")
-        
-        elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-            doc = docx.Document(uploaded_file)
-            for paragraph in doc.paragraphs:
-                content += paragraph.text + "\n"
-        
-        elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
-            # Basic PPTX reading - you might need python-pptx
-            content = "PowerPoint content uploaded (basic extraction needed)"
-        
+        try:
+            if uploaded_file.type == "text/plain":
+                content = str(uploaded_file.read(), "utf-8")
+            
+            elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                doc = docx.Document(uploaded_file)
+                for paragraph in doc.paragraphs:
+                    content += paragraph.text + "\n"
+            
+            elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+                # Basic PPTX reading - you might need python-pptx
+                content = "PowerPoint content uploaded (basic extraction needed)"
+            
+        except Exception as e:
+            st.error(f"Failed to read file: {str(e)}")
+            
         return content
 
 def main():
@@ -342,7 +388,8 @@ def main():
             
             if uploaded_file:
                 uploaded_content = generator.read_uploaded_file(uploaded_file)
-                st.success("File uploaded successfully!")
+                if uploaded_content:
+                    st.success("File uploaded successfully!")
         
         else:  # Topic Only
             topic = st.text_input("Presentation Topic:", placeholder="e.g., Climate Change Solutions")
@@ -371,6 +418,16 @@ def main():
         num_slides = st.slider("Number of slides:", 5, 15, 8)
         style = st.selectbox("Presentation style:", ["Professional", "Creative", "Academic", "Minimal"])
         include_images = st.checkbox("Generate AI images", value=True)
+        
+        # Image generation provider selection
+        if include_images:
+            image_provider = st.selectbox(
+                "Image generation provider:",
+                ["openai", "stability"],
+                help="Choose between OpenAI DALL-E or Stability AI"
+            )
+        else:
+            image_provider = "openai"
     
     # Generate presentation
     if st.button("🚀 Generate Presentation", type="primary"):
@@ -396,13 +453,19 @@ def main():
             
             # Step 3: Generate images
             generated_images = []
-            if include_images and stability_key:
+            if include_images:
                 status_text.text("🎨 Generating AI images...")
                 progress_bar.progress(60)
                 
-                for slide in slides_content:
-                    img = generator.generate_ai_image(slide["image_prompt"], stability_key)
-                    generated_images.append(img)
+                # Choose API key based on provider
+                api_key = openai_key if image_provider == "openai" else stability_key
+                
+                if api_key:
+                    for slide in slides_content:
+                        img = generator.generate_ai_image(slide["image_prompt"], api_key, image_provider)
+                        generated_images.append(img)
+                else:
+                    st.warning(f"No {image_provider.upper()} API key provided. Skipping image generation.")
             
             # Step 4: Create PowerPoint
             status_text.text("📊 Creating PowerPoint...")
@@ -449,10 +512,10 @@ def main():
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📋 Required APIs")
 st.sidebar.markdown("""
-- **OpenAI**: Content generation
-- **Google AI**: Image analysis  
-- **Stability AI**: Image generation
-- **SerpAPI**: Web search (optional)
+- **OpenAI**: Content generation & DALL-E images
+- **Google AI**: Image analysis (Gemini Vision)
+- **Stability AI**: Alternative image generation
+- **Web Search**: Automatic research
 """)
 
 st.sidebar.markdown("### 💡 Tips")
@@ -461,6 +524,7 @@ st.sidebar.markdown("""
 - Upload relevant documents
 - Use high-quality images
 - Review generated content
+- At least OpenAI API key recommended
 """)
 
 if __name__ == "__main__":
